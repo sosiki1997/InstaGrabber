@@ -12,6 +12,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from bs4 import BeautifulSoup
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+import shutil
 
 # 配置参数
 CONFIG = {
@@ -206,119 +207,66 @@ def extract_media_from_nodes(nodes):
             
     return list(img_urls), list(video_urls)
 
-def download_media(urls, save_dir, cookies, prefix):
+def download_media(media_urls, save_dir):
     """下载媒体文件
     
     Args:
-        urls: 媒体URL列表
+        media_urls: 包含图片和视频URL的字典
         save_dir: 保存目录
-        cookies: 请求cookie
-        prefix: 文件名前缀
     """
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
+    img_urls = media_urls.get('images', set())
+    video_urls = media_urls.get('videos', set())
+    
+    img_dir = os.path.join(save_dir, "images")
+    video_dir = os.path.join(save_dir, "videos")
+    os.makedirs(img_dir, exist_ok=True)
+    os.makedirs(video_dir, exist_ok=True)
+    
+    # 下载视频封面图片
+    if img_urls:
+        print("开始下载视频封面图片...")
         
-    success_count = 0
-    failed_count = 0
-    
-    # 构建请求头
-    headers = {
-        'user-agent': CONFIG['user_agent'],
-        'referer': 'https://www.instagram.com/',
-        'accept': '*/*',
-        'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        'accept-encoding': 'gzip, deflate, br',
-        'origin': 'https://www.instagram.com',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-site',
-        'sec-ch-ua': '"Chromium";v="112", "Google Chrome";v="112"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"macOS"'
-    }
-    
-    # 使用会话保持连接
-    session = requests.Session()
-    session.headers.update(headers)
-    
-    # 设置cookie
-    for k, v in cookies.items():
-        session.cookies.set(k, v)
-    
-    for idx, url in enumerate(urls):
+        success_count = 0
+        fail_count = 0
+        
+        # 创建一个临时的浏览器实例用于下载
+        driver = get_browser_instance()
         try:
-            # 从URL解析文件扩展名
-            ext = url.split('?')[0].split('.')[-1]
-            if ext not in ['jpg', 'jpeg', 'png', 'mp4', 'webp']:
-                if 'video' in prefix:
-                    ext = 'mp4'  # 默认视频扩展名
-                else:
-                    ext = 'jpg'  # 默认图片扩展名
-                
-            filename = os.path.join(save_dir, f"{prefix}_{idx:04d}.{ext}")
-            
-            # 检查文件是否已存在
-            if os.path.exists(filename):
-                print(f"文件已存在，跳过: {filename}")
-                success_count += 1
-                continue
-                
-            print(f"下载: {idx+1}/{len(urls)} - {os.path.basename(filename)}")
-            
-            # 重试机制
-            max_retries = 3
-            retry_delay = 2
-            
-            for retry in range(max_retries):
-                try:
-                    # 添加随机延迟，避免被检测
-                    time.sleep(1 + random.random() * 2)
-                    
-                    # 构建特定URL的请求头
-                    url_headers = headers.copy()
-                    url_headers['referer'] = 'https://www.instagram.com/'
-                    
-                    # 发送请求
-                    resp = session.get(url, headers=url_headers, timeout=CONFIG['request_timeout'], stream=True)
-                    
-                    if resp.status_code == 200:
-                        with open(filename, 'wb') as f:
-                            for chunk in resp.iter_content(chunk_size=1024):
-                                if chunk:
-                                    f.write(chunk)
+            for i, img_url in enumerate(img_urls):
+                # 只处理视频封面图片
+                if img_url.startswith('poster:'):
+                    if download_image_with_browser(driver, img_url, img_dir, i):
                         success_count += 1
-                        break
-                    elif resp.status_code == 403:
-                        print(f"访问受限 (HTTP 403)，尝试重试 {retry+1}/{max_retries}")
-                        # 增加延迟
-                        time.sleep(retry_delay * (retry + 1))
-                        # 更换请求头
-                        url_headers['user-agent'] = f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(100, 120)}.0.0.0 Safari/537.36"
                     else:
-                        print(f"下载失败: HTTP {resp.status_code}")
-                        if retry < max_retries - 1:
-                            print(f"尝试重试 {retry+1}/{max_retries}")
-                            time.sleep(retry_delay * (retry + 1))
-                        else:
-                            failed_count += 1
-                            break
-                except (requests.exceptions.RequestException, IOError) as e:
-                    print(f"下载异常: {e}")
-                    if retry < max_retries - 1:
-                        print(f"尝试重试 {retry+1}/{max_retries}")
-                        time.sleep(retry_delay * (retry + 1))
-                    else:
-                        failed_count += 1
-                        break
-            
-            # 每个文件下载后添加随机延迟
-            time.sleep(0.5 + random.random())
-            
-        except Exception as e:
-            print(f"处理文件异常: {e}")
-            failed_count += 1
-            
-    print(f"下载完成: 成功 {success_count} 个, 失败 {failed_count} 个")
+                        fail_count += 1
+        finally:
+            driver.quit()
+        
+        print(f"视频封面图片下载完成: 成功 {success_count} 个, 失败 {fail_count} 个")
+    else:
+        print("未找到视频封面图片")
+    
+    # 下载视频
+    if video_urls:
+        print("开始下载视频...")
+        
+        success_count = 0
+        fail_count = 0
+        
+        # 创建一个临时的浏览器实例用于下载
+        driver = get_browser_instance()
+        try:
+            for i, video_url in enumerate(video_urls):
+                if download_video_with_browser(driver, video_url, video_dir, i):
+                    success_count += 1
+                else:
+                    fail_count += 1
+        finally:
+            driver.quit()
+        
+        print(f"视频下载完成: 成功 {success_count} 个, 失败 {fail_count} 个")
+    else:
+        print("未找到视频URL")
 
 def get_user_id(username, cookie):
     """获取Instagram用户ID，尝试多种API方式
@@ -383,7 +331,7 @@ def get_user_id(username, cookie):
     return None
 
 def extract_media_from_post(driver, post_url):
-    """从帖子页面提取媒体URL
+    """从Instagram帖子中提取媒体URL
     
     Args:
         driver: Selenium WebDriver实例
@@ -398,242 +346,111 @@ def extract_media_from_post(driver, post_url):
     try:
         # 访问帖子页面
         driver.get(post_url)
-        time.sleep(5)  # 增加等待时间，确保页面完全加载
+        time.sleep(5)  # 增加等待时间确保页面完全加载
         
-        # 获取帖子ID用于关联
-        post_id = post_url.split('/')[-2]
-        print(f"  - 帖子ID: {post_id}")
+        # 提取帖子ID
+        post_id = None
+        if '/p/' in post_url:
+            post_id = post_url.split('/p/')[1].split('/')[0]
+        elif '/reel/' in post_url:
+            post_id = post_url.split('/reel/')[1].split('/')[0]
         
-        # 检查是否有视频标志
-        has_video = False
-        is_reel = '/reel/' in post_url
+        if post_id:
+            print(f"  - 帖子ID: {post_id}")
         
-        if is_reel:
-            has_video = True
-            print(f"  - 检测到视频帖子")
+        # 检测是否为视频帖子
+        is_video = False
         
-        # 获取页面源码
-        page_source = driver.page_source
+        # 方法1: 检查URL类型 - Reels几乎总是视频
+        if '/reel/' in post_url:
+            is_video = True
+            print("  - 检测到Reel视频帖子")
         
-        # 方法1: 使用JavaScript提取所有图片和视频URL
-        js_script = """
-        function getAllMedia() {
-            const media = {
-                images: [],
-                videos: []
-            };
-            
-            // 获取所有图片
-            const images = document.querySelectorAll('img');
-            images.forEach(img => {
-                if (img.src && img.src.includes('instagram') && !img.src.includes('profile_pic')) {
-                    media.images.push(img.src);
-                }
-                
-                // 尝试获取srcset属性中的高分辨率图像
-                if (img.srcset) {
-                    const srcset = img.srcset.split(',');
-                    const highResImg = srcset[srcset.length - 1].trim().split(' ')[0];
-                    if (highResImg && highResImg.includes('instagram')) {
-                        media.images.push(highResImg);
-                    }
-                }
-            });
-            
-            // 获取所有视频
-            const videos = document.querySelectorAll('video');
-            videos.forEach(video => {
-                if (video.src) {
-                    media.videos.push(video.src);
-                    
-                    // 添加视频封面
-                    if (video.poster) {
-                        media.images.push(video.poster);
-                    }
-                }
-                
-                // 检查source子元素
-                const sources = video.querySelectorAll('source');
-                sources.forEach(source => {
-                    if (source.src) {
-                        media.videos.push(source.src);
-                    }
-                });
-            });
-            
-            // 尝试从meta标签提取
-            const videoMeta = document.querySelector('meta[property="og:video"]');
-            if (videoMeta && videoMeta.content) {
-                media.videos.push(videoMeta.content);
-            }
-            
-            const imgMeta = document.querySelector('meta[property="og:image"]');
-            if (imgMeta && imgMeta.content) {
-                media.images.push(imgMeta.content);
-            }
-            
-            // 去重
-            media.images = [...new Set(media.images)];
-            media.videos = [...new Set(media.videos)];
-            
-            return media;
-        }
-        
-        return getAllMedia();
-        """
-        
-        result = driver.execute_script(js_script)
-        
-        # 处理JavaScript结果
-        js_images = result.get('images', [])
-        js_videos = result.get('videos', [])
-        
-        # 添加图片URL
-        for img_url in js_images:
-            if is_valid_url(img_url):
-                print(f"  - 从JavaScript找到图片URL")
-                img_urls.add(f"poster:{post_id}:{img_url}")
-        
-        # 添加视频URL
-        for video_url in js_videos:
-            if is_valid_url(video_url):
-                if video_url.startswith('blob:'):
-                    print(f"  - 检测到blob视频URL")
-                    has_video = True
-                else:
-                    print(f"  - 从JavaScript找到视频URL")
-                    video_urls.add(f"video:{post_id}:{video_url}")
-                    has_video = True
-        
-        # 方法2: 从页面源码中提取图片URL
-        if not img_urls:
-            # 尝试提取og:image元标签
-            meta_img_matches = re.findall(r'<meta property="og:image" content="([^"]+)"', page_source)
-            if meta_img_matches:
-                img_url = meta_img_matches[0]
-                if is_valid_url(img_url):
-                    print(f"  - 从og:image元标签找到图片URL")
-                    img_urls.add(f"poster:{post_id}:{img_url}")
-            
-            # 尝试提取display_url字段
-            display_url_matches = re.findall(r'"display_url":"(https:[^"]+)"', page_source)
-            if display_url_matches:
-                for url in display_url_matches:
-                    img_url = url.replace('\\u0026', '&')
-                    if is_valid_url(img_url):
-                        print(f"  - 从display_url字段找到图片URL")
-                        img_urls.add(f"poster:{post_id}:{img_url}")
-            
-            # 尝试提取display_resources字段
-            display_resources = re.findall(r'"display_resources":\[(.*?)\]', page_source)
-            if display_resources:
-                for resources in display_resources:
-                    urls = re.findall(r'"src":"(https:[^"]+)"', resources)
-                    if urls:
-                        # 通常最后一个URL是最高分辨率
-                        img_url = urls[-1].replace('\\u0026', '&')
-                        if is_valid_url(img_url):
-                            print(f"  - 从display_resources字段找到图片URL")
-                            img_urls.add(f"poster:{post_id}:{img_url}")
-        
-        # 方法3: 从页面源码中提取视频URL
-        if has_video and not video_urls:
-            # 视频URL的正则表达式模式
-            video_patterns = [
-                r'"video_url":"(https:[^"]+)"',
-                r'"video_versions":\[(.*?)\]',
-                r'"progressive_url":"(https:[^"]+)"',
-                r'property="og:video" content="([^"]+)"',
-                r'property="og:video:secure_url" content="([^"]+)"',
-                r'<source src="([^"]+)"'
-            ]
-            
-            for pattern in video_patterns:
-                matches = re.findall(pattern, page_source)
-                if matches:
-                    if pattern == r'"video_versions":\[(.*?)\]' and matches:
-                        # 需要进一步解析
-                        url_matches = re.findall(r'"url":"(https:[^"]+)"', matches[0])
-                        if url_matches:
-                            video_url = url_matches[0].replace('\\u0026', '&')
-                            print(f"  - 从video_versions字段找到视频URL")
-                            if is_valid_url(video_url):
-                                video_urls.add(f"video:{post_id}:{video_url}")
-                    else:
-                        # 直接使用匹配到的URL
-                        video_url = matches[0].replace('\\u0026', '&')
-                        print(f"  - 从{pattern}找到视频URL")
-                        if is_valid_url(video_url):
-                            video_urls.add(f"video:{post_id}:{video_url}")
-        
-        # 方法4: 如果仍然没有图片，尝试截取帖子区域
-        if not img_urls:
+        # 方法2: 检查视频元素
+        if not is_video:
             try:
-                # 尝试找到主图像区域
-                main_element = None
-                
-                # 尝试各种可能的选择器
-                selectors = [
-                    "article img", 
-                    "div._aagv img", 
-                    "div[role='button'] img",
-                    "div[data-visualcompletion='loading-state'] img"
-                ]
-                
-                for selector in selectors:
-                    try:
-                        elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                        if elements and len(elements) > 0:
-                            main_element = elements[0]
-                            break
-                    except:
-                        pass
-                
-                if main_element:
-                    # 创建文件名
-                    timestamp = int(time.time())
-                    screenshot_file = f"post_image_{post_id}_{timestamp}.png"
-                    
-                    # 截取元素
-                    main_element.screenshot(screenshot_file)
-                    print(f"  - 已截取帖子图像: {screenshot_file}")
-                    
-                    # 添加为本地文件URL，带标记
-                    img_urls.add(f"poster:{post_id}:file://{os.path.abspath(screenshot_file)}")
-                else:
-                    # 如果没有找到元素，截取整个页面
-                    timestamp = int(time.time())
-                    screenshot_file = f"post_page_{post_id}_{timestamp}.png"
-                    driver.save_screenshot(screenshot_file)
-                    print(f"  - 已保存帖子页面截图: {screenshot_file}")
-                    img_urls.add(f"poster:{post_id}:file://{os.path.abspath(screenshot_file)}")
+                video_elements = driver.find_elements(By.TAG_NAME, "video")
+                if video_elements and len(video_elements) > 0:
+                    is_video = True
+                    print("  - 检测到视频元素")
             except Exception as e:
-                print(f"  - 截取帖子区域失败: {e}")
-                # 如果截取失败，保存整个页面截图
-                timestamp = int(time.time())
-                screenshot_file = f"post_page_{post_id}_{timestamp}.png"
-                driver.save_screenshot(screenshot_file)
-                print(f"  - 已保存帖子页面截图: {screenshot_file}")
-                img_urls.add(f"poster:{post_id}:file://{os.path.abspath(screenshot_file)}")
+                print(f"  - 检查视频元素失败: {e}")
         
-        # 如果检测到视频但没有提取到URL，记录特殊标记
-        if has_video and not video_urls:
-            print("  - 检测到视频但未能提取URL")
-            # 将帖子URL添加为特殊标记
-            video_urls.add(f"video:{post_id}:post_url:{post_url}")
+        # 方法3: 检查页面元素和属性
+        if not is_video:
+            try:
+                # 查找可能表明这是视频的元素
+                video_indicators = driver.find_elements(By.XPATH, 
+                    "//span[contains(@aria-label, 'video') or contains(@aria-label, 'Video')]")
+                if video_indicators and len(video_indicators) > 0:
+                    is_video = True
+                    print("  - 通过页面元素检测到视频")
+            except:
+                pass
+                
+        # 方法4: 使用JavaScript检测视频
+        if not is_video:
+            try:
+                is_video_js = driver.execute_script("""
+                    // 检查是否存在video标签
+                    if (document.querySelector('video')) return true;
+                    
+                    // 检查是否有视频相关的属性
+                    const videoAttrs = ['aria-label', 'alt', 'title'];
+                    for (const attr of videoAttrs) {
+                        const elements = document.querySelectorAll(`[${attr}*="video" i]`);
+                        if (elements.length > 0) return true;
+                    }
+                    
+                    // 检查meta标签
+                    const ogType = document.querySelector('meta[property="og:type"]');
+                    if (ogType && ogType.content && ogType.content.includes('video')) return true;
+                    
+                    // 检查SVG图标（播放按钮等）
+                    const svgIcons = document.querySelectorAll('svg');
+                    for (const svg of svgIcons) {
+                        if (svg.innerHTML.includes('polygon') || svg.innerHTML.includes('path')) {
+                            const rect = svg.getBoundingClientRect();
+                            // 如果SVG图标大小合适，可能是播放按钮
+                            if (rect.width > 20 && rect.height > 20) return true;
+                        }
+                    }
+                    
+                    return false;
+                """)
+                
+                if is_video_js:
+                    is_video = True
+                    print("  - 通过JavaScript检测到视频")
+            except:
+                pass
+        
+        # 方法5: 强制假设所有帖子都可能包含视频
+        # 这是最激进的方法，但可以确保不会漏掉视频
+        if not is_video and post_id:
+            print("  - 未检测到视频特征，但仍尝试下载视频")
+            is_video = True
+        
+        # 如果是视频帖子，提取视频URL
+        if is_video:
+            # 提取视频URL
+            try:
+                # 使用特殊标记，表示这是帖子URL
+                video_url = f"video:{post_id}:post_url:{post_url}"
+                video_urls.add(video_url)
+                print("  - 已添加视频URL到下载列表")
+            except Exception as e:
+                print(f"  - 提取视频URL失败: {e}")
+                
+            if len(video_urls) == 0:
+                print("  - 检测到视频但未能提取URL")
+        else:
+            print("  - 未检测到视频，可能是图片帖子")
+        
+        return img_urls, video_urls
     except Exception as e:
-        print(f"提取媒体异常: {e}")
-        # 尝试保存当前页面截图
-        try:
-            timestamp = int(time.time())
-            screenshot_file = f"error_page_{post_id}_{timestamp}.png"
-            driver.save_screenshot(screenshot_file)
-            print(f"  - 已保存错误页面截图: {screenshot_file}")
-            img_urls.add(f"poster:{post_id}:file://{os.path.abspath(screenshot_file)}")
-        except:
-            pass
-    
-    return img_urls, video_urls
+        print(f"  - 提取媒体失败: {e}")
+        return set(), set()
 
 def filter_media_urls(img_urls, video_urls):
     """过滤媒体URL，去除重复和低质量的媒体
@@ -679,12 +496,12 @@ def filter_media_urls(img_urls, video_urls):
     
     return filtered_img_urls, filtered_video_urls
 
-def download_image_with_browser(driver, image_url, save_dir, idx):
-    """使用浏览器直接下载图片
+def download_image_with_browser(driver, img_url, save_dir, idx):
+    """下载图片
     
     Args:
         driver: Selenium WebDriver实例
-        image_url: 图片URL
+        img_url: 图片URL
         save_dir: 保存目录
         idx: 图片索引
     
@@ -696,51 +513,21 @@ def download_image_with_browser(driver, image_url, save_dir, idx):
         os.makedirs(save_dir, exist_ok=True)
         
         # 处理带标记的URL
-        if image_url.startswith('poster:'):
+        if img_url.startswith('poster:'):
             # 提取帖子ID和真实URL
-            parts = image_url.split(':', 2)
+            parts = img_url.split(':', 2)
             if len(parts) == 3:
                 post_id = parts[1]
                 real_url = parts[2]
                 
-                # 处理本地文件URL
-                if real_url.startswith('file://'):
-                    # 从URL中提取文件路径
-                    file_path = real_url[7:]
-                    if os.path.exists(file_path):
-                        # 构建目标文件名，使用帖子ID
-                        target_file = os.path.join(save_dir, f"poster_{post_id}.png")
-                        
-                        # 复制文件
-                        import shutil
-                        shutil.copy2(file_path, target_file)
-                        print(f"  - 已保存视频封面图: {os.path.basename(target_file)}")
-                        
-                        # 删除原始截图文件
-                        os.remove(file_path)
-                        
-                        return True
-                    return False
-                
                 # 构建文件名，使用帖子ID
-                ext = real_url.split('?')[0].split('.')[-1]
-                if ext not in ['jpg', 'jpeg', 'png', 'webp']:
-                    ext = 'jpg'
-                    
-                filename = os.path.join(save_dir, f"poster_{post_id}.{ext}")
-                
-                # 更新image_url为真实URL
-                image_url = real_url
+                filename = os.path.join(save_dir, f"poster_{post_id}.jpg")
             else:
                 # 构建默认文件名
-                filename = os.path.join(save_dir, f"img_{idx:04d}.jpg")
+                filename = os.path.join(save_dir, f"image_{idx:04d}.jpg")
         else:
             # 构建默认文件名
-            ext = image_url.split('?')[0].split('.')[-1]
-            if ext not in ['jpg', 'jpeg', 'png', 'webp']:
-                ext = 'jpg'
-                
-            filename = os.path.join(save_dir, f"img_{idx:04d}.{ext}")
+            filename = os.path.join(save_dir, f"image_{idx:04d}.jpg")
         
         # 检查文件是否已存在
         if os.path.exists(filename):
@@ -749,30 +536,46 @@ def download_image_with_browser(driver, image_url, save_dir, idx):
             
         print(f"下载图片: {os.path.basename(filename)}")
         
-        # 方法1: 直接使用requests下载
+        # 处理本地文件URL
+        if img_url.startswith('file://'):
+            local_path = img_url[7:]
+            if os.path.exists(local_path):
+                shutil.copy(local_path, filename)
+                print(f"  - 已复制本地文件: {os.path.basename(filename)}")
+                return True
+            else:
+                print(f"  - 本地文件不存在: {local_path}")
+                return False
+        
+        # 方法1: 使用requests下载
         try:
             print("  - 方法1: 使用requests下载...")
+            
+            # 如果是带标记的URL，提取真实URL
+            if img_url.startswith('poster:'):
+                parts = img_url.split(':', 2)
+                if len(parts) == 3:
+                    real_url = parts[2]
+                    img_url = real_url
             
             # 构建自定义请求头
             headers = {
                 'User-Agent': CONFIG['user_agent'],
                 'Referer': 'https://www.instagram.com/',
-                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8'
             }
             
-            resp = requests.get(image_url, headers=headers, timeout=10)
+            resp = requests.get(img_url, headers=headers, timeout=30, stream=True)
             if resp.status_code == 200:
-                # 验证是否是图片
-                content_type = resp.headers.get('Content-Type', '')
-                if content_type.startswith('image/'):
-                    with open(filename, 'wb') as f:
-                        f.write(resp.content)
-                    
-                    # 验证是否为有效图片
-                    if os.path.exists(filename) and os.path.getsize(filename) > 5000:
-                        return True
-                else:
-                    print(f"  - 不是图片内容: {content_type}")
+                with open(filename, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                # 验证文件是否为图片
+                if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                    print(f"  - 成功下载图片: {os.path.basename(filename)}")
+                    return True
             else:
                 print(f"  - 请求失败: {resp.status_code}")
         except Exception as e:
@@ -782,6 +585,13 @@ def download_image_with_browser(driver, image_url, save_dir, idx):
         try:
             print("  - 方法2: 使用curl命令下载...")
             
+            # 如果是带标记的URL，提取真实URL
+            if img_url.startswith('poster:'):
+                parts = img_url.split(':', 2)
+                if len(parts) == 3:
+                    real_url = parts[2]
+                    img_url = real_url
+            
             # 构建curl命令
             curl_cmd = [
                 'curl',
@@ -789,15 +599,16 @@ def download_image_with_browser(driver, image_url, save_dir, idx):
                 '-o', filename,
                 '-H', f'User-Agent: {CONFIG["user_agent"]}',
                 '-H', 'Referer: https://www.instagram.com/',
-                image_url
+                img_url
             ]
             
             # 执行命令
             import subprocess
-            subprocess.run(curl_cmd, check=True, timeout=15, capture_output=True)
+            subprocess.run(curl_cmd, check=True, timeout=30, capture_output=True)
             
             # 验证文件
-            if os.path.exists(filename) and os.path.getsize(filename) > 5000:
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                print(f"  - 成功下载图片: {os.path.basename(filename)}")
                 return True
         except Exception as e:
             print(f"  - Curl下载失败: {e}")
@@ -845,161 +656,26 @@ def download_video_with_browser(driver, video_url, save_dir, idx):
                     driver.get(post_url)
                     time.sleep(5)  # 增加等待时间确保页面完全加载
 
-                    # 检测是否是voidstomper的视频，使用特殊方法处理
+                    # 对特定账号使用特殊处理
                     if "voidstomper" in post_url.lower():
-                        print("  - 检测到voidstomper账号的视频，使用特殊方法处理")
+                        print(f"  - 检测到特殊账号的视频，使用特殊处理")
                         
-                        # 使用更多的等待时间确保页面完全加载
+                        # 给页面更多时间加载，确保视频元素可见
                         time.sleep(3)
                         
-                        # 尝试点击视频区域以确保视频加载
+                        # 尝试点击视频元素以触发加载
                         try:
-                            # 尝试点击视频元素
                             video_elements = driver.find_elements(By.TAG_NAME, "video")
                             if video_elements:
-                                # 滚动到视频元素
                                 driver.execute_script("arguments[0].scrollIntoView();", video_elements[0])
                                 time.sleep(2)
-                                
-                                # 点击视频元素
                                 actions = ActionChains(driver)
                                 actions.move_to_element(video_elements[0]).click().perform()
                                 time.sleep(3)
-                                
-                                # 获取视频地址
-                                video_src = driver.execute_script("""
-                                const videos = document.querySelectorAll('video');
-                                for(let v of videos) {
-                                    if(v.src && v.src !== "") {
-                                        return v.src;
-                                    }
-                                    
-                                    // 检查video的currentSrc属性
-                                    if(v.currentSrc && v.currentSrc !== "") {
-                                        return v.currentSrc;
-                                    }
-                                }
-                                return null;
-                                """)
-                                
-                                if video_src and not video_src.startswith("blob:"):
-                                    print(f"  - 直接从视频元素找到链接: {video_src}")
-                                    
-                                    # 使用ffmpeg直接下载视频流
-                                    try:
-                                        print("  - 尝试使用ffmpeg下载视频流")
-                                        import subprocess
-                                        cmd = [
-                                            'ffmpeg',
-                                            '-i', video_src,
-                                            '-c', 'copy',
-                                            '-y',
-                                            filename
-                                        ]
-                                        
-                                        # 执行ffmpeg命令
-                                        subprocess.run(cmd, check=True, timeout=60, capture_output=True)
-                                        
-                                        if os.path.exists(filename) and os.path.getsize(filename) > 10000:
-                                            print(f"  - 使用ffmpeg成功下载视频: {os.path.basename(filename)}")
-                                            return True
-                                    except Exception as e:
-                                        print(f"  - 使用ffmpeg下载失败: {e}")
                         except Exception as e:
                             print(f"  - 点击视频元素失败: {e}")
-                        
-                        # 尝试直接从网页HTML获取真实视频URL
-                        print("  - 尝试从网页源码中提取真实视频URL")
-                        page_source = driver.page_source
-                        
-                        # 视频URL模式匹配 - 专门针对Instagram Reels
-                        reels_patterns = [
-                            r'"video_url":"(https:[^"]+)"',
-                            r'"video_versions":\[\{"type":[0-9]+,"width":[0-9]+,"height":[0-9]+,"url":"([^"]+)"',
-                            r'"progressive_url":"(https:[^"]+)"',
-                            r'"permalinkUrl":"[^"]+","video":{"contentUrl":"([^"]+)"',
-                            r'<meta property="og:video" content="([^"]+)"',
-                            r'<meta property="og:video:secure_url" content="([^"]+)"'
-                        ]
-                        
-                        # 优先尝试提取video_url字段
-                        for pattern in reels_patterns:
-                            matches = re.findall(pattern, page_source)
-                            if matches and len(matches) > 0:
-                                video_url = matches[0]
-                                # 处理转义字符
-                                video_url = video_url.replace('\\u0026', '&').replace('\\/', '/')
-                                
-                                print(f"  - 从源码中提取到真实视频URL: {video_url}")
-                                
-                                # 使用curl下载
-                                try:
-                                    import subprocess
-                                    curl_cmd = [
-                                        'curl',
-                                        '-L',
-                                        '-A', CONFIG['user_agent'],
-                                        '-o', filename,
-                                        video_url
-                                    ]
-                                    
-                                    subprocess.run(curl_cmd, check=True, timeout=60, capture_output=True)
-                                    
-                                    if os.path.exists(filename) and os.path.getsize(filename) > 10000:
-                                        # 验证文件是否为视频
-                                        file_type_cmd = ['file', '-b', '--mime-type', filename]
-                                        file_type = subprocess.run(file_type_cmd, check=True, capture_output=True, text=True).stdout.strip()
-                                        
-                                        if file_type.startswith('video/'):
-                                            print(f"  - 成功下载视频: {os.path.basename(filename)}")
-                                            return True
-                                        else:
-                                            print(f"  - 下载的文件不是视频: {file_type}")
-                                            os.remove(filename)
-                                except Exception as e:
-                                    print(f"  - 使用curl下载失败: {e}")
-                        
-                        # 如果上述方法失败，尝试最后的办法 - 使用ffmpeg录制屏幕中的视频
-                        try:
-                            print("  - 尝试使用ffmpeg录制屏幕中的视频")
-                            
-                            # 获取视频元素的位置和大小
-                            video_element = driver.find_element(By.TAG_NAME, "video")
-                            location = video_element.location
-                            size = video_element.size
-                            
-                            # 计算视频元素在屏幕上的坐标
-                            x = location['x']
-                            y = location['y']
-                            width = size['width']
-                            height = size['height']
-                            
-                            # 准备ffmpeg命令 - 使用屏幕录制
-                            # 注意：这种方法需要系统支持屏幕录制，可能不适用于所有系统
-                            import subprocess
-                            import platform
-                            
-                            if platform.system() == 'Darwin':  # macOS
-                                # 点击视频元素开始播放
-                                actions = ActionChains(driver)
-                                actions.move_to_element(video_element).click().perform()
-                                time.sleep(1)
-                                
-                                # 使用QuickTime Player录制
-                                # 由于这需要UI交互，这里只提供一个提示
-                                print("  - 无法自动下载，请尝试手动步骤:")
-                                print("  - 1. 使用QuickTime Player进行屏幕录制")
-                                print(f"  - 2. 捕获位置: x={x}, y={y}, 宽={width}, 高={height}")
-                                print(f"  - 3. 将录制的视频保存为: {filename}")
-                                
-                                # 保存一个视频封面图片作为参考
-                                thumbnail_file = filename.replace('.mp4', '_thumbnail.png')
-                                video_element.screenshot(thumbnail_file)
-                                print(f"  - 已保存视频缩略图: {os.path.basename(thumbnail_file)}")
-                        except Exception as e:
-                            print(f"  - 录制视频失败: {e}")
                     
-                    # 首先尝试使用yt-dlp下载（首选方法）
+                    # 使用yt-dlp下载视频（最有效的方法）
                     print("方法1: 尝试使用第三方工具下载...")
                     try:
                         # 使用yt-dlp/youtube-dl下载
@@ -1012,19 +688,18 @@ def download_video_with_browser(driver, video_url, save_dir, idx):
                             post_url
                         ]
                         
-                        # 首先检查是否安装了yt-dlp
+                        # 检查是否安装了yt-dlp
                         try:
                             subprocess.run(['which', 'yt-dlp'], check=True, capture_output=True)
                             print("  - 检测到yt-dlp，尝试使用它下载...")
                             subprocess.run(cmd, check=True, timeout=60, capture_output=True)
                             
                             if os.path.exists(filename) and os.path.getsize(filename) > 10000:
-                                print(f"  - 使用yt-dlp成功下载视频: {os.path.basename(filename)}")
-                                
-                                # 验证下载的文件是否为真实视频文件
+                                # 验证文件是否为视频
                                 import mimetypes
                                 mime_type, _ = mimetypes.guess_type(filename)
                                 if mime_type and mime_type.startswith('video/'):
+                                    print(f"  - 使用yt-dlp成功下载视频: {os.path.basename(filename)}")
                                     return True
                                 
                                 # 使用file命令检查文件类型
@@ -1033,13 +708,15 @@ def download_video_with_browser(driver, video_url, save_dir, idx):
                                                               capture_output=True, text=True, check=True)
                                     file_type = file_check.stdout.strip()
                                     if file_type.startswith('video/'):
+                                        print(f"  - 使用yt-dlp成功下载视频: {os.path.basename(filename)}")
                                         return True
                                     else:
                                         print(f"  - 警告：下载的文件不是视频 ({file_type})，尝试其他方法")
-                                        # 如果不是视频文件，删除它并尝试其他方法
                                         os.remove(filename)
                                 except:
-                                    pass
+                                    # 无法确定类型但文件存在，假设成功
+                                    print(f"  - 使用yt-dlp成功下载视频: {os.path.basename(filename)}")
+                                    return True
                         except:
                             # 如果没有yt-dlp，尝试使用youtube-dl
                             try:
@@ -1050,134 +727,15 @@ def download_video_with_browser(driver, video_url, save_dir, idx):
                                 
                                 if os.path.exists(filename) and os.path.getsize(filename) > 10000:
                                     print(f"  - 使用youtube-dl成功下载视频: {os.path.basename(filename)}")
-                                    
-                                    # 验证下载的文件是否为真实视频文件
-                                    import mimetypes
-                                    mime_type, _ = mimetypes.guess_type(filename)
-                                    if mime_type and mime_type.startswith('video/'):
-                                        return True
-                                    
-                                    # 使用file命令检查文件类型
-                                    try:
-                                        file_check = subprocess.run(['file', '-b', '--mime-type', filename], 
-                                                                  capture_output=True, text=True, check=True)
-                                        file_type = file_check.stdout.strip()
-                                        if file_type.startswith('video/'):
-                                            return True
-                                        else:
-                                            print(f"  - 警告：下载的文件不是视频 ({file_type})，尝试其他方法")
-                                            # 如果不是视频文件，删除它并尝试其他方法
-                                            os.remove(filename)
-                                    except:
-                                        pass
+                                    return True
                             except:
                                 print("  - 系统中未安装yt-dlp或youtube-dl")
+                                print("  - 建议安装yt-dlp以获取视频: pip install yt-dlp")
                     except Exception as e:
                         print(f"  - 使用第三方工具下载失败: {e}")
                     
-                    # 使用浏览器开发工具获取视频URL
-                    print("方法2: 使用浏览器开发工具获取视频URL...")
-                    
-                    # 在页面上点击视频区域，尝试触发视频加载
-                    try:
-                        # 尝试点击视频元素
-                        video_elements = driver.find_elements(By.TAG_NAME, "video")
-                        if video_elements:
-                            # 滚动到视频元素
-                            driver.execute_script("arguments[0].scrollIntoView();", video_elements[0])
-                            time.sleep(2)
-                            
-                            # 点击视频元素
-                            actions = ActionChains(driver)
-                            actions.move_to_element(video_elements[0]).click().perform()
-                            time.sleep(3)
-                    except:
-                        pass
-                    
-                    # 获取网络请求日志中的视频URL
-                    logs = driver.execute_script("""
-                    var videoUrls = [];
-                    var performance = window.performance || window.mozPerformance || window.msPerformance || window.webkitPerformance || {};
-                    var network = performance.getEntries() || [];
-                    
-                    network.forEach(function(entry) {
-                        var url = entry.name || '';
-                        if(url.endsWith('.mp4') || 
-                           url.includes('/video_url') || 
-                           url.includes('/video/') || 
-                           url.includes('videoplayback') ||
-                           url.includes('blob:')) {
-                            videoUrls.push(url);
-                        }
-                    });
-                    
-                    return videoUrls;
-                    """)
-                    
-                    if logs and len(logs) > 0:
-                        for log_url in logs:
-                            if log_url.startswith('blob:'):
-                                print(f"  - 发现blob视频URL，尝试处理: {log_url}")
-                                continue
-                                
-                            # 过滤掉伪造的视频URL
-                            if 'unified_cvc' in log_url or not (log_url.endswith('.mp4') or '/progressive_download/' in log_url):
-                                print(f"  - 忽略无效视频URL: {log_url}")
-                                continue
-                                
-                            if is_valid_url(log_url) and ('.mp4' in log_url or '/video/' in log_url or '/progressive_download/' in log_url):
-                                print(f"  - 从网络日志中找到视频URL: {log_url}")
-                                
-                                # 直接下载
-                                try:
-                                    headers = {
-                                        'User-Agent': CONFIG['user_agent'],
-                                        'Referer': post_url,
-                                        'Accept': '*/*'
-                                    }
-                                    
-                                    resp = requests.get(log_url, headers=headers, timeout=30, stream=True)
-                                    if resp.status_code == 200:
-                                        # 检查Content-Type
-                                        content_type = resp.headers.get('Content-Type', '')
-                                        if not ('video/' in content_type or 'application/octet-stream' in content_type):
-                                            print(f"  - 内容类型不是视频: {content_type}")
-                                            continue
-                                            
-                                        with open(filename, 'wb') as f:
-                                            for chunk in resp.iter_content(chunk_size=8192):
-                                                if chunk:
-                                                    f.write(chunk)
-                                        
-                                        if os.path.exists(filename) and os.path.getsize(filename) > 10000:
-                                            # 验证下载的文件是否为真实视频文件
-                                            import mimetypes
-                                            mime_type, _ = mimetypes.guess_type(filename)
-                                            if mime_type and mime_type.startswith('video/'):
-                                                print(f"  - 成功下载视频: {os.path.basename(filename)}")
-                                                return True
-                                            
-                                            # 使用file命令检查文件类型
-                                            try:
-                                                file_check = subprocess.run(['file', '-b', '--mime-type', filename], 
-                                                                         capture_output=True, text=True, check=True)
-                                                file_type = file_check.stdout.strip()
-                                                if file_type.startswith('video/'):
-                                                    print(f"  - 成功下载视频: {os.path.basename(filename)}")
-                                                    return True
-                                                else:
-                                                    print(f"  - 警告：下载的文件不是视频 ({file_type})，尝试其他方法")
-                                                    # 如果不是视频文件，删除它并尝试其他方法
-                                                    os.remove(filename)
-                                            except:
-                                                # 无法确定文件类型，假设成功
-                                                print(f"  - 成功下载视频: {os.path.basename(filename)}")
-                                                return True
-                                except Exception as e:
-                                    print(f"  - 下载视频失败: {e}")
-                    
-                    # 尝试方法3：使用JavaScript提取视频URL
-                    print("方法3: 尝试使用JavaScript提取视频URL...")
+                    # 尝试使用JavaScript提取视频URL (备选方法)
+                    print("方法2: 尝试从页面提取视频URL...")
                     js_video_url = driver.execute_script("""
                     function getVideoUrl() {
                         // 尝试方法1: 寻找所有的视频元素
@@ -1208,24 +766,6 @@ def download_video_with_browser(driver, video_url, save_dir, idx):
                             return videoMeta.content;
                         }
                         
-                        // 尝试方法3: 从页面脚本中提取
-                        const scripts = document.querySelectorAll('script');
-                        for (const script of scripts) {
-                            const content = script.textContent || '';
-                            
-                            // 检查是否包含video_url字段
-                            const videoUrlMatch = content.match(/"video_url":"([^"]+)"/);
-                            if (videoUrlMatch && videoUrlMatch[1]) {
-                                return videoUrlMatch[1].replace(/\\u0026/g, '&');
-                            }
-                            
-                            // 检查是否包含progressive_url字段
-                            const progressiveUrlMatch = content.match(/"progressive_url":"([^"]+)"/);
-                            if (progressiveUrlMatch && progressiveUrlMatch[1]) {
-                                return progressiveUrlMatch[1].replace(/\\u0026/g, '&');
-                            }
-                        }
-                        
                         return null;
                     }
                     
@@ -1233,7 +773,7 @@ def download_video_with_browser(driver, video_url, save_dir, idx):
                     """)
                     
                     if js_video_url and is_valid_url(js_video_url) and not js_video_url.startswith('blob:'):
-                        print(f"  - 从JavaScript中提取到视频URL: {js_video_url}")
+                        print(f"  - 从页面中提取到视频URL: {js_video_url}")
                         
                         # 下载视频
                         try:
@@ -1247,50 +787,23 @@ def download_video_with_browser(driver, video_url, save_dir, idx):
                             if resp.status_code == 200:
                                 # 检查Content-Type
                                 content_type = resp.headers.get('Content-Type', '')
-                                if not ('video/' in content_type or 'application/octet-stream' in content_type):
-                                    print(f"  - 内容类型不是视频: {content_type}")
-                                else:
+                                if 'video/' in content_type or 'application/octet-stream' in content_type:
                                     with open(filename, 'wb') as f:
                                         for chunk in resp.iter_content(chunk_size=8192):
                                             if chunk:
                                                 f.write(chunk)
                                     
                                     if os.path.exists(filename) and os.path.getsize(filename) > 10000:
-                                        # 验证下载的文件是否为真实视频文件
-                                        import mimetypes
-                                        mime_type, _ = mimetypes.guess_type(filename)
-                                        if mime_type and mime_type.startswith('video/'):
-                                            print(f"  - 成功下载视频: {os.path.basename(filename)}")
-                                            return True
-                                        
-                                        # 使用file命令检查文件类型
-                                        try:
-                                            file_check = subprocess.run(['file', '-b', '--mime-type', filename], 
-                                                                     capture_output=True, text=True, check=True)
-                                            file_type = file_check.stdout.strip()
-                                            if file_type.startswith('video/'):
-                                                print(f"  - 成功下载视频: {os.path.basename(filename)}")
-                                                return True
-                                            else:
-                                                print(f"  - 警告：下载的文件不是视频 ({file_type})，尝试其他方法")
-                                                # 如果不是视频文件，删除它并尝试其他方法
-                                                os.remove(filename)
-                                        except:
-                                            # 无法确定文件类型，假设成功
-                                            print(f"  - 成功下载视频: {os.path.basename(filename)}")
-                                            return True
+                                        print(f"  - 成功下载视频: {os.path.basename(filename)}")
+                                        return True
+                                else:
+                                    print(f"  - 内容类型不是视频: {content_type}")
                         except Exception as e:
                             print(f"  - 下载视频失败: {e}")
                     
-                    # 如果所有方法都失败，截取视频截图并提示安装工具
-                    print("  - 所有视频提取方法都失败!")
+                    print("  - 所有视频提取方法都失败")
                     print("  - 建议安装yt-dlp工具以获取更好的视频下载支持")
                     print("  - 命令: pip install yt-dlp")
-                    
-                    # 保存视频截图
-                    screenshot_file = filename.replace('.mp4', '.png')
-                    driver.save_screenshot(screenshot_file)
-                    print(f"  - 已保存视频界面截图: {os.path.basename(screenshot_file)}")
                     return False
                 
                 # 更新video_url为真实URL
@@ -1312,9 +825,9 @@ def download_video_with_browser(driver, video_url, save_dir, idx):
             
         print(f"下载视频: {os.path.basename(filename)}")
         
-        # 方法1: 直接使用requests下载
+        # 使用requests下载
         try:
-            print("  - 方法1: 使用requests下载...")
+            print("  - 使用requests下载...")
             
             # 构建自定义请求头
             headers = {
@@ -1327,7 +840,7 @@ def download_video_with_browser(driver, video_url, save_dir, idx):
             if resp.status_code == 200:
                 # 验证是否是视频
                 content_type = resp.headers.get('Content-Type', '')
-                if 'video/' in content_type or 'octet-stream' in content_type:
+                if 'video/' in content_type or 'application/octet-stream' in content_type:
                     with open(filename, 'wb') as f:
                         for chunk in resp.iter_content(chunk_size=8192):
                             if chunk:
@@ -1344,32 +857,7 @@ def download_video_with_browser(driver, video_url, save_dir, idx):
         except Exception as e:
             print(f"  - 请求下载失败: {e}")
         
-        # 方法2: 使用curl命令下载
-        try:
-            print("  - 方法2: 使用curl命令下载...")
-            
-            # 构建curl命令
-            curl_cmd = [
-                'curl',
-                '-L',
-                '-o', filename,
-                '-H', f'User-Agent: {CONFIG["user_agent"]}',
-                '-H', 'Referer: https://www.instagram.com/',
-                video_url
-            ]
-            
-            # 执行命令
-            import subprocess
-            subprocess.run(curl_cmd, check=True, timeout=30, capture_output=True)
-            
-            # 验证文件
-            if os.path.exists(filename) and os.path.getsize(filename) > 10000:
-                print(f"  - 成功下载视频: {os.path.basename(filename)}")
-                return True
-        except Exception as e:
-            print(f"  - Curl下载失败: {e}")
-        
-        print("  - 所有方法都失败了")
+        print("  - 下载失败")
         return False
     except Exception as e:
         print(f"视频下载总体失败: {e}")
@@ -1477,17 +965,22 @@ def main():
         js_script = """
         function getPostLinks() {
             const links = [];
+            const reelLinks = [];
             
             // 方法1：查找所有链接
             const allLinks = document.querySelectorAll('a');
             allLinks.forEach(a => {
                 const href = a.getAttribute('href');
-                if (href && (href.includes('/p/') || href.includes('/reel/'))) {
-                    // 确保是完整URL
-                    if (href.startsWith('http')) {
-                        links.push(href);
-                    } else {
-                        links.push('https://www.instagram.com' + href);
+                if (href) {
+                    // 优先处理Reels视频
+                    if (href.includes('/reel/')) {
+                        const fullUrl = href.startsWith('http') ? href : 'https://www.instagram.com' + href;
+                        reelLinks.push(fullUrl);
+                    } 
+                    // 然后处理普通帖子
+                    else if (href.includes('/p/')) {
+                        const fullUrl = href.startsWith('http') ? href : 'https://www.instagram.com' + href;
+                        links.push(fullUrl);
                     }
                 }
             });
@@ -1498,30 +991,25 @@ def main():
                 const parent = container.closest('a');
                 if (parent) {
                     const href = parent.getAttribute('href');
-                    if (href && (href.includes('/p/') || href.includes('/reel/'))) {
-                        if (href.startsWith('http')) {
-                            links.push(href);
-                        } else {
-                            links.push('https://www.instagram.com' + href);
+                    if (href) {
+                        // 优先处理Reels视频
+                        if (href.includes('/reel/')) {
+                            const fullUrl = href.startsWith('http') ? href : 'https://www.instagram.com' + href;
+                            reelLinks.push(fullUrl);
+                        } 
+                        // 然后处理普通帖子
+                        else if (href.includes('/p/')) {
+                            const fullUrl = href.startsWith('http') ? href : 'https://www.instagram.com' + href;
+                            links.push(fullUrl);
                         }
                     }
                 }
             });
             
-            // 方法3：查找带有图片的链接
-            const imgLinks = document.querySelectorAll('a:has(img)');
-            imgLinks.forEach(a => {
-                const href = a.getAttribute('href');
-                if (href && (href.includes('/p/') || href.includes('/reel/'))) {
-                    if (href.startsWith('http')) {
-                        links.push(href);
-                    } else {
-                        links.push('https://www.instagram.com' + href);
-                    }
-                }
-            });
-            
-            return [...new Set(links)]; // 去重
+            // 合并结果，确保Reels视频在前面
+            const uniqueReels = [...new Set(reelLinks)];
+            const uniqueLinks = [...new Set(links)];
+            return [...uniqueReels, ...uniqueLinks];
         }
         
         return getPostLinks();
@@ -1579,24 +1067,37 @@ def main():
             if not post_links:
                 print("尝试使用常规方法提取链接...")
                 
-                # 查找所有帖子链接元素
-                post_elements = driver.find_elements(By.XPATH, "//a[contains(@href, '/p/') or contains(@href, '/reel/')]")
+                # 先查找Reels链接
+                reel_elements = driver.find_elements(By.XPATH, "//a[contains(@href, '/reel/')]")
+                post_elements = driver.find_elements(By.XPATH, "//a[contains(@href, '/p/')]")
                 
                 post_links = []
+                
+                # 优先添加Reels链接
+                for element in reel_elements:
+                    href = element.get_attribute("href")
+                    if href and "instagram.com/reel/" in href:
+                        post_links.append(href)
+                
+                # 然后添加普通帖子链接
                 for element in post_elements:
                     href = element.get_attribute("href")
-                    if href and ("instagram.com/p/" in href or "instagram.com/reel/" in href):
+                    if href and "instagram.com/p/" in href:
                         post_links.append(href)
         
         # 去重
         post_links = list(dict.fromkeys(post_links))
+        
+        # 优先处理Reels视频
+        reel_links = [link for link in post_links if '/reel/' in link]
+        post_links = reel_links + [link for link in post_links if '/reel/' not in link]
         
         # 如果是测试模式，限制爬取数量
         if test_mode and len(post_links) > count:
             print(f"测试模式: 限制爬取 {count}/{len(post_links)} 个帖子")
             post_links = post_links[:count]
         
-        print(f"共提取到 {len(post_links)} 个帖子链接")
+        print(f"共提取到 {len(post_links)} 个帖子链接，其中 {len(reel_links)} 个Reels视频")
         
         # 访问每个帖子并提取媒体
         img_urls = set()
@@ -1620,33 +1121,7 @@ def main():
     
         # 创建保存目录
         save_dir = os.path.join("data", username)
-        img_dir = os.path.join(save_dir, "images")
-        video_dir = os.path.join(save_dir, "videos")
-        os.makedirs(img_dir, exist_ok=True)
-        os.makedirs(video_dir, exist_ok=True)
-        
-        # 下载图片
-        if img_urls:
-            print("开始下载图片...")
-            
-            # 如果是测试模式且图片数量大于限制，则只下载部分
-            download_img_urls = list(img_urls)
-            if test_mode and len(download_img_urls) > count:
-                print(f"限制下载 {count}/{len(download_img_urls)} 张图片，避免过多请求")
-                download_img_urls = download_img_urls[:count]
-            
-            success_count = 0
-            fail_count = 0
-            
-            for i, img_url in enumerate(download_img_urls):
-                if download_image_with_browser(driver, img_url, img_dir, i):
-                    success_count += 1
-                else:
-                    fail_count += 1
-            
-            print(f"图片下载完成: 成功 {success_count} 个, 失败 {fail_count} 个")
-        else:
-            print("未找到图片URL")
+        os.makedirs(save_dir, exist_ok=True)
         
         # 下载视频
         if video_urls:
@@ -1662,7 +1137,7 @@ def main():
             fail_count = 0
             
             for i, video_url in enumerate(download_video_urls):
-                if download_video_with_browser(driver, video_url, video_dir, i):
+                if download_video_with_browser(driver, video_url, save_dir, i):
                     success_count += 1
                 else:
                     fail_count += 1
